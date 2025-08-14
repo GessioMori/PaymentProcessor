@@ -1,4 +1,6 @@
 
+using PaymentProcessor.Api.Services;
+
 namespace PaymentProcessor.Api;
 
 public class Program
@@ -7,7 +9,7 @@ public class Program
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-
+        builder.Services.AddSingleton<IPaymentService, PaymentService>();
         builder.Services.AddControllers();
         builder.Services.AddOpenApi();
 
