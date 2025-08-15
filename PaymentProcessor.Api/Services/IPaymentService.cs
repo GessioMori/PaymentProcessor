@@ -3,5 +3,6 @@
 namespace PaymentProcessor.Api.Services;
 public interface IPaymentService
 {
-    Task<bool> ProcessPaymentAsync(Payment payment);
+    Task ProcessPaymentAsync(Payment payment, CancellationToken cancellationToken = default);
+    Task<StatsResponse> GetSummaryAsync(DateTime from, DateTime to);
 }

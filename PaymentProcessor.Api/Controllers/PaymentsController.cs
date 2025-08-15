@@ -15,9 +15,16 @@ public class PaymentsController : ControllerBase
     }
 
     [HttpPost("payments")]
-    public IActionResult ProcessPayment([FromBody] Payment payment)
+    public async Task<IActionResult> ProcessPayment([FromBody] Payment payment, CancellationToken cancellationToken)
     {
-        this.paymentService.ProcessPaymentAsync(payment).GetAwaiter().GetResult();
+        await this.paymentService.ProcessPaymentAsync(payment, cancellationToken);
         return this.Ok();
+    }
+
+    [HttpGet("payments-summary")]
+    public async Task<IActionResult> ProcessPaymentSummary([FromQuery] DateTime from, [FromQuery] DateTime to)
+    {
+        StatsResponse summary = await this.paymentService.GetSummaryAsync(from, to);
+        return this.Ok(summary);
     }
 }

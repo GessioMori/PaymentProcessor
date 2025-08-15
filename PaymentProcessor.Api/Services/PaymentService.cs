@@ -1,34 +1,47 @@
 ﻿using PaymentProcessor.Api.Entities;
+using PaymentProcessor.Api.Infra;
+using StackExchange.Redis;
+using System.Globalization;
+using System.Threading.Channels;
 
 namespace PaymentProcessor.Api.Services;
 
-public class PaymentService : IPaymentService
+public sealed class PaymentService : IPaymentService
 {
-    private readonly HttpClient httpClient;
+    private readonly ChannelWriter<Payment> writer;
+    private readonly IDatabase redis;
 
-    public PaymentService()
+    private const string defaultKey = "payments:default";
+    private const string fallbackKey = "payments:fallback";
+
+    public PaymentService(ChannelWriter<Payment> writer, RedisConnection redisConn)
     {
-        this.httpClient = new HttpClient
-        {
-            BaseAddress = new Uri("http://payment-processor-default:8080")
-        };
+        this.writer = writer;
+        this.redis = redisConn.Database;
     }
 
-    public async Task<bool> ProcessPaymentAsync(Payment payment)
+    public async Task<StatsResponse> GetSummaryAsync(DateTime from, DateTime to)
     {
-        PaymentRecord paymentRecord = new(
-            payment.CorrelationId,
-            payment.Amount,
-            DateTime.UtcNow
-        );
+        double fromScore = from.ToUniversalTime().Subtract(DateTime.UnixEpoch).TotalMilliseconds;
 
-        HttpResponseMessage response = await this.httpClient.PostAsJsonAsync("/payments", paymentRecord);
+        double toScore = to.ToUniversalTime().Subtract(DateTime.UnixEpoch).TotalMilliseconds;
 
-        if (response.IsSuccessStatusCode)
-        {
-            return true;
-        }
+        // Default
+        RedisValue[] defaultValues = await this.redis.SortedSetRangeByScoreAsync(defaultKey, fromScore, toScore).ConfigureAwait(false);
+        int defaultTotalRequests = defaultValues.Length;
+        decimal defaultTotalAmount = defaultValues.Sum(x => decimal.Parse(x.ToString().Split(':')[1], CultureInfo.InvariantCulture));
 
-        return false;
+        // Fallback
+        RedisValue[] fallbackValues = await this.redis.SortedSetRangeByScoreAsync(fallbackKey, fromScore, toScore).ConfigureAwait(false);
+        int fallbackTotalRequests = fallbackValues.Length;
+        decimal fallbackTotalAmount = fallbackValues.Sum(x => decimal.Parse(x.ToString().Split(':')[1], CultureInfo.InvariantCulture));
+
+        return new StatsResponse(new RequestStats(defaultTotalRequests, defaultTotalAmount),
+            new RequestStats(fallbackTotalRequests, fallbackTotalAmount));
+    }
+
+    public async Task ProcessPaymentAsync(Payment payment, CancellationToken cancellationToken = default)
+    {
+        await this.writer.WriteAsync(payment, cancellationToken).ConfigureAwait(false);
     }
 }
