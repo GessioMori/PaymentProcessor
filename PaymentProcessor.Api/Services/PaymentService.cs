@@ -40,8 +40,8 @@ public sealed class PaymentService : IPaymentService
             new RequestStats(fallbackTotalRequests, fallbackTotalAmount));
     }
 
-    public async Task ProcessPaymentAsync(Payment payment, CancellationToken cancellationToken = default)
+    public void ProcessPaymentAsync(Payment payment)
     {
-        await this.writer.WriteAsync(payment, cancellationToken).ConfigureAwait(false);
+        this.writer.TryWrite(payment);
     }
 }
