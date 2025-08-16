@@ -1,3 +1,2 @@
-﻿namespace PaymentProcessor.Api.Entities;
-
+﻿namespace PaymentProcessor.Shared;
 public record RequestStats(long TotalRequests, decimal TotalAmount);

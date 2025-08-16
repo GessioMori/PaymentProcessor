@@ -1,3 +1,2 @@
-﻿namespace PaymentProcessor.Api.Entities;
-
+﻿namespace PaymentProcessor.Shared;
 public record StatsResponse(RequestStats Default, RequestStats Fallback);

@@ -1,6 +1,4 @@
-using PaymentProcessor.Api.Entities;
-using PaymentProcessor.Api.Serialization;
-using PaymentProcessor.Api.Services;
+using PaymentProcessor.Shared;
 using StackExchange.Redis;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -24,22 +22,10 @@ public class Program
 
             options.Limits.MaxConcurrentConnections = 1000;
             options.Limits.MaxConcurrentUpgradedConnections = 1000;
-            options.Limits.MaxRequestBodySize = 1024 * 1024; // 1MB
+            options.Limits.MaxRequestBodySize = 1024 * 1024;
             options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
             options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(10);
         });
-
-        Channel<Payment> channel = Channel.CreateBounded<Payment>(new BoundedChannelOptions(100_000)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.DropOldest,
-            AllowSynchronousContinuations = true
-        });
-
-        builder.Services.AddSingleton(channel);
-        builder.Services.AddSingleton<ChannelWriter<Payment>>(channel.Writer);
-        builder.Services.AddSingleton<ChannelReader<Payment>>(channel.Reader);
 
         builder.Services.AddSingleton<IConnectionMultiplexer>(provider =>
         {
@@ -56,37 +42,23 @@ public class Program
             return ConnectionMultiplexer.Connect(configuration);
         });
 
-        builder.Services.Configure<PaymentWorkerOptions>(options =>
-        {
-            options.MaxConcurrency = 5;
-            options.HttpTimeoutSeconds = 3;
-            options.MaxRetryAttempts = 5;
-            options.ConnectionsPerServer = 50;
-            options.PooledConnectionLifetimeMinutes = 10;
-            options.PooledConnectionIdleTimeoutMinutes = 2;
-            options.ConnectTimeoutSeconds = 2;
-        });
-
         builder.Services.AddSingleton<IDatabase>(provider =>
             provider.GetRequiredService<IConnectionMultiplexer>().GetDatabase());
-
-        builder.Services.AddHostedService<PaymentProcessorWorker>();
 
         builder.Services.ConfigureHttpJsonOptions(options =>
         {
             options.SerializerOptions.TypeInfoResolverChain.Insert(0, JsonContext.Default);
             options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-            options.SerializerOptions.DefaultBufferSize = 16 * 1024; // Buffer maior
+            options.SerializerOptions.DefaultBufferSize = 16 * 1024;
         });
 
         WebApplication app = builder.Build();
 
-        app.MapPost("/payments", (Payment payment, ChannelWriter<Payment> writer) =>
-        {
-            bool written = writer.TryWrite(payment);
-            return written ? Results.Ok() : Results.StatusCode(503);
-        })
-        .WithName("ProcessPayment");
+        app.MapPost("/payments", (Payment payment, IDatabase redis) => { 
+            string serialized = JsonSerializer.Serialize(payment, JsonContext.Default.Payment); 
+            redis.ListLeftPushAsync("payments:queue", serialized); 
+            return Results.Ok(); 
+        }).WithName("ProcessPayment");
 
         app.MapGet("/payments-summary", async (DateTime from, DateTime to, IDatabase redis) =>
         {
@@ -111,7 +83,6 @@ public class Program
                 return {count, total}
             ";
 
-            // Executar Lua script no Redis
             RedisResult result = await redis.ScriptEvaluateAsync(luaScript,
                 ["payments:default"],
                 [fromScore, toScore]);

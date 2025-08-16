@@ -1,7 +1,6 @@
-﻿using PaymentProcessor.Api.Entities;
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
-namespace PaymentProcessor.Api.Serialization;
+namespace PaymentProcessor.Shared;
 
 [JsonSerializable(typeof(Payment))]
 [JsonSerializable(typeof(PaymentRecord))]

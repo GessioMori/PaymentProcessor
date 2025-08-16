@@ -1,5 +1,4 @@
-﻿namespace PaymentProcessor.Api.Services;
-
+﻿namespace PaymentProcessor.Worker;
 public class PaymentWorkerOptions
 {
     public int MaxConcurrency { get; set; } = 20;

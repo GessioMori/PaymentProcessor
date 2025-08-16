@@ -16,8 +16,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: "125MB"
+          cpus: "4"
+          memory: "200MB"
 
   api2:
     <<: *api
@@ -30,8 +30,27 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
-          memory: "125MB"
+          cpus: "4"
+          memory: "200MB"
+
+  worker:
+    image: ${DOCKER_REGISTRY-}paymentprocessorworker
+    build:
+      context: .
+      dockerfile: PaymentProcessor.Worker/Dockerfile
+    hostname: worker
+    networks:
+      - backend
+      - payment-processor
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: "150MB"
 
   nginx:
     image: nginx:1.29.0-alpine
@@ -49,8 +68,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.3"
-          memory: "70MB"
+          cpus: "1"
+          memory: "200MB"
 
   redis:
     image: redis:7-alpine
@@ -63,8 +82,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.2"
-          memory: "30MB"
+          cpus: "1"
+          memory: "100MB"
 
 volumes:
   sockets: {}
