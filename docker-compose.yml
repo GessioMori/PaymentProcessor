@@ -16,8 +16,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4"
-          memory: "200MB"
+          cpus: "0.3"
+          memory: "60MB"
 
   api2:
     <<: *api
@@ -30,8 +30,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4"
-          memory: "200MB"
+          cpus: "0.3"
+          memory: "60MB"
 
   worker:
     image: ${DOCKER_REGISTRY-}paymentprocessorworker
@@ -49,8 +49,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: "150MB"
+          cpus: "0.5"
+          memory: "110MB"
 
   nginx:
     image: nginx:1.29.0-alpine
@@ -68,8 +68,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: "200MB"
+          cpus: "0.2"
+          memory: "60MB"
 
   redis:
     image: redis:7-alpine
@@ -82,8 +82,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: "100MB"
+          cpus: "0.2"
+          memory: "60MB"
 
 volumes:
   sockets: {}
