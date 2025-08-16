@@ -12,7 +12,7 @@ services:
       - ASPNETCORE_ENVIRONMENT=Production
       - SOCKET_PATH=/sockets/api1.sock
     volumes:
-      - ./sockets:/sockets
+      - /sockets:/sockets
     deploy:
       resources:
         limits:
@@ -23,7 +23,7 @@ services:
     <<: *api
     hostname: api2
     volumes:
-      - ./sockets:/sockets
+      - /sockets:/sockets
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - SOCKET_PATH=/sockets/api2.sock
@@ -38,7 +38,7 @@ services:
     user: "0:0"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./sockets:/sockets
+      - /sockets:/sockets
     depends_on:
       - api1
       - api2

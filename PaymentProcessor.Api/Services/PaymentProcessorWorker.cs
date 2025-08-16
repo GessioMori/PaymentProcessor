@@ -1,67 +1,111 @@
-﻿using PaymentProcessor.Api.Entities;
-using PaymentProcessor.Api.Infra;
+﻿using Microsoft.Extensions.Options;
+using PaymentProcessor.Api.Entities;
 using PaymentProcessor.Api.Serialization;
+using PaymentProcessor.Api.Services;
 using StackExchange.Redis;
 using System.Threading.Channels;
 
-namespace PaymentProcessor.Api.Services;
-
-public sealed class PaymentProcessorWorker : BackgroundService
+public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
 {
     private readonly ChannelReader<Payment> externalReader;
     private readonly HttpClient httpClient;
     private readonly Uri defaultProcessor;
-    private readonly Uri fallbackProcessor;
-
     private readonly Channel<RetryPayment> retryQueue;
-    private readonly SemaphoreSlim mainParallelism;
-    private readonly SemaphoreSlim retryParallelism;
-
     private readonly IDatabase redis;
 
-    public PaymentProcessorWorker(ChannelReader<Payment> externalReader, RedisConnection redisConn)
+    private readonly int maxConcurrency;
+    private readonly SemaphoreSlim concurrencyLimiter;
+
+    private readonly TaskFactory taskFactory;
+
+    private long processedCount = 0;
+    private long failedCount = 0;
+    private long retryCount = 0;
+
+    private readonly PaymentWorkerOptions options;
+
+    public PaymentProcessorWorker(ChannelReader<Payment> externalReader, IDatabase redis,
+        IOptions<PaymentWorkerOptions> optionsAccessor)
     {
         this.externalReader = externalReader;
-        this.httpClient = new HttpClient();
+        this.redis = redis;
+        this.options = optionsAccessor.Value;
+
+        SocketsHttpHandler handler = new()
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(this.options.PooledConnectionLifetimeMinutes),
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(this.options.PooledConnectionIdleTimeoutMinutes),
+            MaxConnectionsPerServer = this.options.ConnectionsPerServer,
+            EnableMultipleHttp2Connections = true,
+            ConnectTimeout = TimeSpan.FromSeconds(this.options.ConnectTimeoutSeconds),
+            ResponseDrainTimeout = TimeSpan.FromSeconds(1)
+        };
+
+        this.httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(this.options.HttpTimeoutSeconds),
+            DefaultRequestHeaders = {
+                { "Accept", "application/json" },
+                { "User-Agent", "PaymentProcessor/1.0" }
+            }
+        };
+
         this.defaultProcessor = new Uri("http://payment-processor-default:8080/payments");
-        this.fallbackProcessor = new Uri("http://payment-processor-fallback:8080/payments");
 
-        this.retryQueue = Channel.CreateUnbounded<RetryPayment>();
+        this.retryQueue = Channel.CreateUnbounded<RetryPayment>(new UnboundedChannelOptions
+        {
+            SingleReader = false,
+            SingleWriter = false,
+            AllowSynchronousContinuations = true
+        });
 
-        this.mainParallelism = new SemaphoreSlim(5);
-        this.retryParallelism = new SemaphoreSlim(3);
-
-        this.redis = redisConn.Database;
+        this.maxConcurrency = Math.Max(Environment.ProcessorCount * 4, 20);
+        this.concurrencyLimiter = new SemaphoreSlim(this.options.MaxConcurrency, this.options.MaxConcurrency);
+        this.taskFactory = new TaskFactory(TaskScheduler.Default);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _ = Task.Run(() => this.ProcessMainQueueAsync(stoppingToken), stoppingToken);
-        _ = Task.Run(() => this.ProcessRetryQueueAsync(stoppingToken), stoppingToken);
+        Task[] mainProcessors = Enumerable.Range(0, Environment.ProcessorCount)
+            .Select(_ => this.ProcessMainQueueAsync(stoppingToken))
+            .ToArray();
 
-        await Task.CompletedTask;
+        Task[] retryProcessors = Enumerable.Range(0, 2)
+            .Select(_ => this.ProcessRetryQueueAsync(stoppingToken))
+            .ToArray();
+
+        await Task.WhenAll(mainProcessors.Concat(retryProcessors));
     }
 
     private async Task ProcessMainQueueAsync(CancellationToken ct)
     {
         await foreach (Payment payment in this.externalReader.ReadAllAsync(ct))
         {
-            await this.mainParallelism.WaitAsync(ct);
+            await this.concurrencyLimiter.WaitAsync(ct);
 
-            _ = Task.Run(async () =>
+            _ = this.taskFactory.StartNew(async () =>
             {
                 try
                 {
-                    if (!await this.ProcessPaymentAsync(payment, ct))
+                    bool success = await this.ProcessPaymentAsync(payment, ct);
+
+                    if (success)
                     {
-                        await this.retryQueue.Writer.WriteAsync(new RetryPayment(payment), ct);
+                        Interlocked.Increment(ref this.processedCount);
+                    }
+                    else
+                    {
+                        Interlocked.Increment(ref this.failedCount);
+
+                        RetryPayment retryPayment = new(payment, 0, DateTime.UtcNow.AddMilliseconds(500));
+                        await this.retryQueue.Writer.WriteAsync(retryPayment, ct);
                     }
                 }
                 finally
                 {
-                    this.mainParallelism.Release();
+                    this.concurrencyLimiter.Release();
                 }
-            }, ct);
+            }, ct, TaskCreationOptions.None, TaskScheduler.Default).Unwrap();
         }
     }
 
@@ -69,59 +113,91 @@ public sealed class PaymentProcessorWorker : BackgroundService
     {
         await foreach (RetryPayment retryPayment in this.retryQueue.Reader.ReadAllAsync(ct))
         {
-            TimeSpan delay = TimeSpan.FromMilliseconds(100 * Math.Pow(2, retryPayment.Attempt + 1) + Random.Shared.Next(0, 50));
+            DateTime now = DateTime.UtcNow;
+            if (retryPayment.RetryAt > now)
+            {
+                TimeSpan delay = retryPayment.RetryAt - now;
+                await Task.Delay(delay, ct);
+            }
 
-            await Task.Delay(delay, ct);
+            await this.concurrencyLimiter.WaitAsync(ct);
 
-            await this.retryParallelism.WaitAsync(ct);
-
-            _ = Task.Run(async () =>
+            _ = this.taskFactory.StartNew(async () =>
             {
                 try
                 {
                     bool success = await this.ProcessPaymentAsync(retryPayment.Payment, ct);
-                    if (!success && retryPayment.Attempt < 10)
+
+                    if (success)
                     {
-                        await this.retryQueue.Writer.WriteAsync(retryPayment with { Attempt = retryPayment.Attempt + 1 }, ct);
+                        Interlocked.Increment(ref this.processedCount);
+                    }
+                    else if (retryPayment.Attempt < this.options.MaxRetryAttempts)
+                    {
+                        Interlocked.Increment(ref this.retryCount);
+
+                        int nextAttempt = retryPayment.Attempt + 1;
+                        double baseDelay = Math.Min(1000 * Math.Pow(2, nextAttempt), 30000);
+                        int jitter = Random.Shared.Next(0, (int)(baseDelay * 0.1));
+                        DateTime retryAt = DateTime.UtcNow.AddMilliseconds(baseDelay + jitter);
+
+                        RetryPayment newRetryPayment = retryPayment with
+                        {
+                            Attempt = nextAttempt,
+                            RetryAt = retryAt
+                        };
+
+                        await this.retryQueue.Writer.WriteAsync(newRetryPayment, ct);
                     }
                 }
                 finally
                 {
-                    this.retryParallelism.Release();
+                    this.concurrencyLimiter.Release();
                 }
-            }, ct);
+            }, ct, TaskCreationOptions.None, TaskScheduler.Default).Unwrap();
         }
     }
 
     private async Task<bool> ProcessPaymentAsync(Payment payment, CancellationToken ct)
     {
-        try
+        DateTime now = DateTime.UtcNow;
+        string requestedAt = now.ToString("o");
+
+        PaymentRecord paymentRecord = new(payment.CorrelationId, payment.Amount, requestedAt);
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(this.options.HttpTimeoutSeconds));
+
+        HttpResponseMessage response = await this.httpClient.PostAsJsonAsync(
+            this.defaultProcessor,
+            paymentRecord,
+            JsonContext.Default.PaymentRecord,
+            cts.Token);
+
+        if (response.IsSuccessStatusCode)
         {
-            DateTime now = DateTime.UtcNow;
-            string requestedAt = now.ToString("o");
-
-            PaymentRecord paymentRecord = new(payment.CorrelationId, payment.Amount, requestedAt);
-
-            HttpResponseMessage response = await this.httpClient.PostAsJsonAsync(this.ChooseProcessor(), paymentRecord, JsonContext.Default.PaymentRecord, ct);
-
-            if (response.IsSuccessStatusCode)
-            {
-                string key = "payments:default";
-                string member = $"{payment.CorrelationId}:{payment.Amount}";
-                await this.redis.SortedSetAddAsync(
-                    key,
-                    member,
-                    now.Subtract(DateTime.UnixEpoch).TotalMilliseconds
-                ).ConfigureAwait(false);
-            }
-
-            return response.IsSuccessStatusCode;
+            _ = this.WriteToRedisAsync(payment, now, ct);
+            return true;
         }
-        catch
-        {
-            return false;
-        }
+
+        return false;
+    }
+    private async Task WriteToRedisAsync(Payment payment, DateTime timestamp, CancellationToken ct)
+    {
+        string key = "payments:default";
+        string member = $"{payment.CorrelationId}:{payment.Amount}";
+        double score = timestamp.Subtract(DateTime.UnixEpoch).TotalMilliseconds;
+
+        await this.redis.SortedSetAddAsync(key, member, score);
     }
 
-    private Uri ChooseProcessor() => this.defaultProcessor;
+    public new void Dispose()
+    {
+        this.httpClient?.Dispose();
+        this.concurrencyLimiter?.Dispose();
+        this.retryQueue?.Writer?.Complete();
+        base.Dispose();
+    }
 }
+
+public record RetryPayment(Payment Payment, int Attempt = 0, DateTime RetryAt = default);
