@@ -10,8 +10,9 @@ services:
       - payment-processor
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
-    ports:
-      - "8080:8080"
+      - SOCKET_PATH=/sockets/api1.sock
+    volumes:
+      - ./sockets:/sockets
     deploy:
       resources:
         limits:
@@ -21,13 +22,23 @@ services:
   api2:
     <<: *api
     hostname: api2
-    ports:
-      - "8081:8080"
+    volumes:
+      - ./sockets:/sockets
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - SOCKET_PATH=/sockets/api2.sock
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "125MB"
 
   nginx:
     image: nginx:1.29.0-alpine
+    user: "0:0"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./sockets:/sockets
     depends_on:
       - api1
       - api2
@@ -54,6 +65,9 @@ services:
         limits:
           cpus: "0.2"
           memory: "30MB"
+
+volumes:
+  sockets: {}
 
 networks:
   backend:

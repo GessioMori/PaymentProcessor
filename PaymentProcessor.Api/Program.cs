@@ -16,6 +16,12 @@ public class Program
 
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            string urls = builder.Configuration["SOCKET_PATH"]!;
+            options.ListenUnixSocket(urls);
+        });
+
         Channel<Payment> channel = Channel.CreateBounded<Payment>(new BoundedChannelOptions(10_000)
         {
             SingleReader = true,
