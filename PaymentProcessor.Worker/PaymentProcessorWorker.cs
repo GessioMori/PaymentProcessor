@@ -16,7 +16,7 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
 
     private readonly PaymentWorkerOptions options;
 
-    private readonly SemaphoreSlim concurrency = new(20);
+    private readonly SemaphoreSlim concurrency = new(8);
 
     public PaymentProcessorWorker(IDatabase redis, IOptions<PaymentWorkerOptions> optionsAccessor)
     {
@@ -27,7 +27,7 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(this.options.PooledConnectionLifetimeMinutes),
             PooledConnectionIdleTimeout = TimeSpan.FromMinutes(this.options.PooledConnectionIdleTimeoutMinutes),
-            MaxConnectionsPerServer = 5000,
+            MaxConnectionsPerServer = 8,
             EnableMultipleHttp2Connections = true,
             ConnectTimeout = TimeSpan.FromMilliseconds(500),
             ResponseDrainTimeout = TimeSpan.FromSeconds(1)
@@ -35,7 +35,6 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
 
         this.httpClient = new HttpClient(handler)
         {
-            Timeout = TimeSpan.FromSeconds(300),
             DefaultRequestHeaders = {
                 { "Accept", "application/json" },
                 { "User-Agent", "PaymentProcessor/1.0" }
@@ -54,11 +53,11 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        Task[] mainProcessors = Enumerable.Range(0, 10)
+        Task[] mainProcessors = Enumerable.Range(0, 4)
             .Select(_ => this.ProcessMainQueueAsync(stoppingToken))
             .ToArray();
 
-        Task[] retryProcessors = Enumerable.Range(0, 10)
+        Task[] retryProcessors = Enumerable.Range(0, 4)
             .Select(_ => this.ProcessRetryQueueAsync(stoppingToken))
             .ToArray();
 
@@ -73,7 +72,7 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
 
             if (!value.HasValue)
             {
-                await Task.Delay(5, ct);
+                await Task.Delay(20, ct);
                 continue;
             }
 
@@ -133,11 +132,11 @@ public sealed class PaymentProcessorWorker : BackgroundService, IDisposable
                 this.WriteToRedisAsync(payment, now, ct);
                 return true;
             }
+
             return false;
         }
         catch (Exception)
         {
-            this.WriteToRedisAsync(payment, now, ct);
             return false;
         }
         finally

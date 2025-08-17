@@ -1,7 +1,7 @@
 using PaymentProcessor.Shared;
 using StackExchange.Redis;
+using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Threading.Channels;
 
 public class Program
 {
@@ -54,10 +54,11 @@ public class Program
 
         WebApplication app = builder.Build();
 
-        app.MapPost("/payments", (Payment payment, IDatabase redis) => { 
-            string serialized = JsonSerializer.Serialize(payment, JsonContext.Default.Payment); 
-            redis.ListLeftPushAsync("payments:queue", serialized); 
-            return Results.Ok(); 
+        app.MapPost("/payments", (Payment payment, IDatabase redis) =>
+        {
+            string serialized = JsonSerializer.Serialize(payment, JsonContext.Default.Payment);
+            redis.ListLeftPushAsync("payments:queue", serialized);
+            return Results.Ok();
         }).WithName("ProcessPayment");
 
         app.MapGet("/payments-summary", async (DateTime from, DateTime to, IDatabase redis) =>
@@ -100,6 +101,25 @@ public class Program
         })
         .WithName("ProcessPaymentSummary");
 
+        app.Lifetime.ApplicationStarted.Register(() => OnStarted(app.Configuration["SOCKET_PATH"]!));
         app.Run();
+    }
+
+    private static void OnStarted(string socketPath)
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            try
+            {
+                File.SetUnixFileMode(socketPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite |
+                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Falha ao ajustar permissões do socket {socketPath}: {ex.Message}");
+            }
+        }
     }
 }
